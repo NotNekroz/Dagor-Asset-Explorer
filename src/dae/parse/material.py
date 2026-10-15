@@ -17,6 +17,53 @@ from PIL.ImageChops import invert
 
 DDSX_HEADER_SIZE = 0x20
 
+import subprocess
+import tempfile
+
+def _texconv_convert_dds_bytes(dds_bytes: bytes, output_format: str = "DDS"):
+    try:
+        texconv_path = path.join(getcwd(), "texconv.exe")
+
+        if not path.exists(texconv_path):
+            print("[ERROR] texconv.exe not found!")
+            return None
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            in_file = path.join(tmpdir, "input.dds")
+
+            with open(in_file, "wb") as f:
+                f.write(dds_bytes)
+
+            result = subprocess.run(
+                [
+                    texconv_path,
+                    "-y",
+                    "-ft", output_format.lower(),
+                    "-o", tmpdir,
+                    in_file
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+
+            if result.returncode != 0:
+                print("[texconv FAIL]")
+                print(result.stderr.decode(errors="ignore"))
+                return None
+
+            out_file = path.join(tmpdir, f"input.{output_format.lower()}")
+
+            if not path.exists(out_file):
+                print("[texconv ERROR] Output file missing")
+                return None
+
+            with open(out_file, "rb") as f:
+                return f.read()
+
+    except Exception as e:
+        print(f"[texconv EXCEPTION] {e}")
+        return None
+
 class DDSx(Packed):
 	class Header:
 		def __repr__(self):
@@ -687,7 +734,8 @@ class MaterialData(Terminable):
 	def getTextureSlots(self):
 		return self.__textureSlots
 
-	def convertTex(self, texture:str, data:bytes, texturePaths:TexturePathDict = None, forceConvert:bool = False, texN:str = None):
+	def convertTex(self, texture: str, data: bytes, texturePaths: TexturePathDict = None, forceConvert: bool = False,
+				   texN: str = None):
 		newName = None
 
 		if texturePaths is not None and texturePaths.get(texture if texN is None else texN) is not None:
@@ -699,26 +747,42 @@ class MaterialData(Terminable):
 				newName = tex.newName
 		else:
 			texType = None
-		
-		if texType is not None or forceConvert:
-			img = Image.open(BytesIO(data))
 
-			if texType is not None and texType != TEXTURE_GENERIC:
-				r, g, b, a = img.split()
+		# --- Try Pillow first ---
+		if texType is not None or forceConvert:
+			try:
+				img = Image.open(BytesIO(data))
+
+				if texType is not None and texType != TEXTURE_GENERIC:
+					r, g, b, a = img.split()
+					img.close()
+
+					if texType == TEXTURE_MASKED:
+						img = Image.merge("RGBA", (r, g, b, invert(a)))
+					elif texType == TEXTURE_NORMAL:
+						whiteChannel = Image.new("L", img.size, 255)
+						img = Image.merge("RGBA", (a, g, whiteChannel, r))
+
+				outBin = BytesIO()
+				img.save(outBin, format="DDS")
+				data = outBin.getvalue()
+				outBin.close()
 				img.close()
 
-				if texType == TEXTURE_MASKED:
-					img = Image.merge("RGBA", (r, g, b, invert(a)))
-				elif texType == TEXTURE_NORMAL:
-					whiteChannel = Image.new("L", img.size, 255)
-					img = Image.merge("RGBA", (a, g, whiteChannel, r))
-			
-			outBin = BytesIO()
-			img.save(outBin, format = "DDS")
-			data = outBin.getvalue()
-			outBin.close()
-			img.close()
-		
+				return data, newName
+
+			except Exception as e:
+				print(f"[Pillow FAIL] {texture}: {e}")
+
+		# --- Fallback to texconv ---
+		print(f"[texconv FALLBACK] {texture}")
+
+		texconv_data = _texconv_convert_dds_bytes(data, "DDS")
+
+		if texconv_data is not None:
+			return texconv_data, newName
+
+		print(f"[SKIP] Failed to convert texture: {texture}")
 		return data, newName
 	
 	def exportTexture(self, texture:str, output:str = getcwd(), forceConvert:bool = False, texturePaths:TexturePathDict = None, texN:str = None):

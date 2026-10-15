@@ -1341,7 +1341,7 @@ class GeomNodeTree(RealResData, ModelContainer):
 				
 				name += b
 			
-			return name.decode("ascii")
+			return name.split(b"\x00", 1)[0].decode("utf-8", errors="ignore")
 
 		def __init__(self, file:BinBlock, main:BinBlock, idx:int):
 			self.tm = self.readMatrix4x4(file)
@@ -2061,7 +2061,7 @@ class DynModel(RendInst):
 		for i in SafeRange(self, nameCnt):
 			next = nameCnt == i + 1 and -1 or readLong(file) - 0x20
 			
-			nameMap.append(nameMapData[prev:next].decode("utf-8").rstrip("\x00"),)
+			nameMap.append(nameMapData[prev:next].decode("utf-8", errors="ignore").rstrip("\x00"),)
 			
 			prev = next
 		

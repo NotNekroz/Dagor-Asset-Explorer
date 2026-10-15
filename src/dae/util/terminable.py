@@ -3,7 +3,7 @@ import sys
 from os import path, getcwd, stat
 
 sys.path.append(path.dirname(path.dirname(path.abspath(__file__))))
-
+import util.compat
 import util.log as log
 from PyQt5.QtCore import QObject
 from abc import ABC, abstractmethod

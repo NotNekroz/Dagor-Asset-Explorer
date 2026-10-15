@@ -6,7 +6,7 @@ import sys
 # sys.path.append(path.join(fp, "gui"))
 # sys.path.append(path.join(fp, "parse"))
 # sys.path.append(path.join(fp, "util"))
-
+import util.compat
 from gui import app
 
 sys.excepthook = lambda cls, e, t: sys.__excepthook__(cls, e, t)

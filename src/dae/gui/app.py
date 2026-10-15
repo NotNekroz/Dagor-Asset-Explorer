@@ -3,7 +3,7 @@ import sys
 from os import path
 
 sys.path.append(path.dirname(path.dirname(path.abspath(__file__))))
-
+import util.compat
 import util.log as log
 import gc
 from PyQt5.uic import loadUi
@@ -21,6 +21,7 @@ from parse.realres import GeomNodeTree, DynModel, RendInst, CollisionGeom
 from parse.material import DDSx
 from parse.dbld import DagorBinaryLevelData
 from util.assetcacher import AssetCacher
+from util.foldercache import FolderCache
 from util.enums import *
 from util.terminable import Exportable, Pack, Terminable
 from gui.settingsDialog import SettingsDialog
@@ -120,12 +121,31 @@ class MainWindow(QMainWindow):
 		self.cachedIcons:dict[str:QIcon] = {}
 
 		self.mapTab.mainWindow = self
+
+		self.currentMountedPaths:list[str] = []
+		self.bypassCache = False
+
+		self.actionReload = QAction("Reload assets (Bypass Cache)", self)
+		self.actionReload.setShortcut("F5")
+		self.actionReload.triggered.connect(self.reloadAssets)
+		self.menuFile.insertAction(self.actionUnmount, self.actionReload)
 		
 		self.show()
+
+		lastPaths = SETTINGS.getValue(SETTINGS_LAST_MOUNTED_PATHS)
+		if lastPaths and SETTINGS.getValue(SETTINGS_AUTO_LOAD_LAST):
+			self.mountAssets(lastPaths)
 
 	def openSettings(self):
 		settings = SettingsDialog(self)
 		settings.exec_()
+
+	def reloadAssets(self):
+		if self.currentMountedPaths:
+			paths = list(self.currentMountedPaths)
+			FolderCache.clearCacheForPaths(paths)
+			self.unmountAssets()
+			self.mountAssets(paths, bypassCache=True)
 
 	def unmountAssets(self):
 		for v in self.clearItems: 
@@ -138,6 +158,8 @@ class MainWindow(QMainWindow):
 
 		self.treeView.clear()
 		AssetCacher.clearCache()
+		self.currentMountedPaths = []
+		SETTINGS.setValue(SETTINGS_LAST_MOUNTED_PATHS, [])
 
 		gc.collect()
 
@@ -193,23 +215,36 @@ class MainWindow(QMainWindow):
 	def __mapLoadFinished(self, map:DagorBinaryLevelData, cellData:list):
 		self.mapTab.mapLoadFinished(map, cellData)
 	
-	def mountAssets(self, paths:list[str]):
-		self.threadPool.start(partial(self.__mountAssetsInternal__, paths))
+	def mountAssets(self, paths:list[str], bypassCache:bool = False):
+		if not paths:
+			return
+		self.currentMountedPaths = paths
+		SETTINGS.setValue(SETTINGS_LAST_MOUNTED_PATHS, paths)
+		self.threadPool.start(partial(self.__mountAssetsInternal__, paths, bypassCache))
 	
-	def __mountAssetsInternal__(self, paths:list[str]):
+	def __mountAssetsInternal__(self, paths:list[str], bypassCache:bool = False):
 		self.setRequestedDialog(DIALOG_STATUS)
+		try:
+			self.setTaskTitle("Mounting assets")
+			self.setTaskStatus("Loading files...")
 		
-		self.setTaskTitle("Mounting assets")
-		self.setTaskStatus("Loading files...")
-	
-		for p in paths:
-			self.exploreFileInfo(QFileInfo(p), self.treeView.treeModel)
+			for p in paths:
+				finfo = QFileInfo(p)
+				if finfo.isDir() and FolderCache.isEnabled() and not bypassCache:
+					tree = FolderCache.getOrBuildTree(finfo.absoluteFilePath())
+					if tree:
+						self.mountCachedDir(tree, self.treeView.treeModel)
+						continue
+				self.exploreFileInfo(finfo, self.treeView.treeModel)
 
-		if SETTINGS.getValue(SETTINGS_EXPAND_ALL):
-			self.setTaskStatus("Expanding items...")
-			self.itemsCreated.emit()
-		
-		self.setRequestedDialog(DIALOG_NONE)
+			if SETTINGS.getValue(SETTINGS_EXPAND_ALL):
+				self.setTaskStatus("Expanding items...")
+				self.itemsCreated.emit()
+		except Exception as e:
+			log.log(f"Error during mount: {e}", LOG_ERROR)
+			print(format_exc())
+		finally:
+			self.setRequestedDialog(DIALOG_NONE)
 	
 	def setRequestedDialog(self, rType:int):
 		self.requestedDialog.emit(rType)
@@ -224,7 +259,6 @@ class MainWindow(QMainWindow):
 		self.__taskStatus = status
 
 		self.taskStatus.emit(status)
-	
 	
 	def getTaskStatus(self):
 		return self.__taskStatus
@@ -241,23 +275,26 @@ class MainWindow(QMainWindow):
 	def clearSubProcess(self):
 		self.activeSubProcess = None
 
-	def exploreFileInfo(self, finfo:QFileInfo, parent:QStandardItem):
+	def mountSingleFile(self, finfo:QFileInfo, parent:QStandardItem) -> bool:
 		if self.shouldTerminate:
 			return False
 
-		if finfo.isFile():
-			absFilePath = finfo.absoluteFilePath()
-			suffix = finfo.completeSuffix()
-			isDesc = absFilePath[-8:] == "Desc.bin"
-			
-			if isDesc or AssetManager.isOpenable(suffix):
-				self.setTaskStatus(f"Loading {absFilePath}")
-				success = False
+		absFilePath = finfo.absoluteFilePath()
+		if not path.isfile(absFilePath):
+			return False
 
-				log.log(f"Found {absFilePath}")
-				log.addLevel()
+		suffix = finfo.completeSuffix()
+		isDesc = absFilePath[-8:] == "Desc.bin"
+		
+		if isDesc or AssetManager.isOpenable(suffix):
+			self.setTaskStatus(f"Loading {absFilePath}")
+			success = False
 
-				if isDesc:
+			log.log(f"Found {absFilePath}")
+			log.addLevel()
+
+			if isDesc:
+				try:
 					grd = GameResDesc(absFilePath)
 
 					AssetCacher.appendGameResDesc(grd)
@@ -267,45 +304,100 @@ class MainWindow(QMainWindow):
 					self.clearTerminable()
 
 					success = True
-				else:
-					level = log.curLevel
+				except Exception as ex:
+					log.log(f"Couldn't load GameResDesc '{absFilePath}'", LOG_ERROR)
+					print(format_exc())
+			else:
+				level = log.curLevel
 
-					try:
-						# pass
-						asset = AssetManager.initializeAsset(absFilePath, suffix)
+				try:
+					asset = AssetManager.initializeAsset(absFilePath, suffix)
 
-						handleCaching(asset)
+					handleCaching(asset)
 
-						self.setTerminable(asset)
+					self.setTerminable(asset)
 
-						if asset == None or not asset.valid:
-							log.log(f"Failed to mount '{finfo.absoluteFilePath()}'", LOG_ERROR)
-						else:
-							item:AssetItem = self.getAssetItem(asset, finfo)
-							
-							parent.appendRow(item.getRow())
+					if asset == None or not asset.valid:
+						log.log(f"Failed to mount '{finfo.absoluteFilePath()}'", LOG_ERROR)
+					else:
+						item:AssetItem = self.getAssetItem(asset, finfo)
+						
+						parent.appendRow(item.getRow())
 
-							success = True
-					except Exception as ex:
-						log.log(f"Couldn't initialize '{absFilePath}'", LOG_ERROR)
-						print(format_exc())
+						success = True
+				except Exception as ex:
+					log.log(f"Couldn't initialize '{absFilePath}'", LOG_ERROR)
+					print(format_exc())
 
-						log.subLevel(log.curLevel - level)
+					log.subLevel(log.curLevel - level)
 
-						pass
-				
-				log.subLevel()
+					pass
+			
+			log.subLevel()
 
-				self.clearTerminable()
+			self.clearTerminable()
 
-				return success
+			return success
+
+		return False
+
+	def mountCachedDir(self, dirNode:dict, parentItem:QStandardItem) -> bool:
+		if self.shouldTerminate:
+			return False
+
+		dirPath = dirNode.get("path", "")
+		finfo = QFileInfo(dirPath)
+		folderItem = FolderItem(self, finfo)
+		hasContent = False
+
+		# 1. Mount any Desc.bin files first
+		for f in dirNode.get("files", []):
+			if self.shouldTerminate:
+				return False
+			if f.get("isDesc"):
+				finfoFile = QFileInfo(f["path"])
+				if self.mountSingleFile(finfoFile, folderItem.mainItem):
+					hasContent = True
+
+		# 2. Mount asset files
+		for f in dirNode.get("files", []):
+			if self.shouldTerminate:
+				return False
+			if not f.get("isDesc"):
+				finfoFile = QFileInfo(f["path"])
+				if self.mountSingleFile(finfoFile, folderItem.mainItem):
+					hasContent = True
+
+		# 3. Mount subdirectories
+		for subName, subNode in dirNode.get("dirs", {}).items():
+			if self.shouldTerminate:
+				return False
+			if self.mountCachedDir(subNode, folderItem.mainItem):
+				hasContent = True
+
+		if hasContent:
+			parentItem.appendRow(folderItem.getRow())
+			return True
+
+		return False
+
+	def exploreFileInfo(self, finfo:QFileInfo, parent:QStandardItem):
+		if self.shouldTerminate:
+			return False
+
+		if finfo.isFile():
+			return self.mountSingleFile(finfo, parent)
 		elif finfo.isDir():
+			if FolderCache.isEnabled() and not self.bypassCache:
+				tree = FolderCache.getOrBuildTree(finfo.absoluteFilePath())
+				if tree:
+					return self.mountCachedDir(tree, parent)
+
 			iterator = QDirIterator(
 				finfo.absoluteFilePath(),
 				AssetManager.getOpenableFiles(),
 				QDir.Files | QDir.AllDirs | QDir.NoDotAndDotDot | QDir.NoSymLinks,
 				QDirIterator.NoIteratorFlags)
-			
 
 			if iterator.hasNext():
 				item = FolderItem(self, finfo)

@@ -56,12 +56,31 @@ class SettingsDialog(QDialog):
 		self.setupCheckBox(self.noMDL, SETTINGS_NO_MDL)
 		self.setupCheckBox(self.dontExportExistingTextures, SETTINGS_DONT_EXPORT_EXISTING_TEXTURES)
 
+		from util.foldercache import FolderCache
+		self.cacheSearchCheck = QCheckBox("Cache folder search results for faster loading", self)
+		self.autoLoadLastCheck = QCheckBox("Automatically reload last mounted folder on startup", self)
+		self.clearCacheBtn = QPushButton("Clear Asset Cache", self)
+		self.clearCacheBtn.clicked.connect(self.onClearCache)
+
+		self.verticalLayout.addWidget(self.cacheSearchCheck)
+		self.verticalLayout.addWidget(self.autoLoadLastCheck)
+		self.verticalLayout.addWidget(self.clearCacheBtn)
+
+		self.setupCheckBox(self.cacheSearchCheck, SETTINGS_CACHE_SEARCH)
+		self.setupCheckBox(self.autoLoadLastCheck, SETTINGS_AUTO_LOAD_LAST)
+
 
 		self.studiomdlLine.setText(SETTINGS.getValue(SETTINGS_STUDIOMDL_PATH))
 		self.studioMdlBtn.clicked.connect(lambda: self.selectFile("Select StudioMDL binary", ["studiomdl.exe"], SETTINGS_STUDIOMDL_PATH, self.studiomdlLine))
 
 		self.gameInfoLine.setText(SETTINGS.getValue(SETTINGS_GAMEINFO_PATH))
 		self.gameInfoBtn.clicked.connect(lambda: self.selectFile("Select gameinfo.txt", ["gameinfo.txt"], SETTINGS_GAMEINFO_PATH, self.gameInfoLine))
+	
+	def onClearCache(self):
+		from util.foldercache import FolderCache
+		FolderCache.clearAllCache()
+		self.clearCacheBtn.setText("Asset Cache Cleared!")
+		self.clearCacheBtn.setEnabled(False)
 	
 	def selectFile(self, title:str, nameFilters:list[str], settingKey:str, lineEdit:QLineEdit):
 		dialog = openFile(self, title = title, nameFilters = nameFilters, fileMode = QFileDialog.ExistingFile)
